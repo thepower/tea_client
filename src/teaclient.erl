@@ -28,7 +28,7 @@ main(Args) ->
 option_spec_list() ->
   [
    %% {Name,     ShortOpt,  LongOpt,       ArgSpec,               HelpMsg}
-   {host,        $h,    "host",        {string, "ceremony.thepower.io"}, "Seremony server"},
+   {host,        $h,    "host",        {string, "tea.thepower.io"}, "Seremony server"},
    {port,        $p,    "port",        {integer, 443},       "Ceremony server's TLS port"},
    {nodename,    $n,    "nodename",   string, "node name (max 10 symbols)"},
    {token,      undefined, undefined,     string, "ceremony token"}

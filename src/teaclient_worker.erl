@@ -9,34 +9,37 @@ start_link(Sub) ->
 
 run(CeremonyID, NodeName) when is_binary(CeremonyID), is_binary(NodeName) ->
   teaclient_worker:run(#{
-                         host=>"knuth.cleverfox.ru",
+                         host=>"tea.thepower.io",
                          port=>1436,
                          token=>CeremonyID,
                          nodename=>NodeName}).
 
 run(#{host:=Ip, port:=Port} = Sub) ->
   process_flag(trap_exit, true),
-  try
-    CaCerts = certifi:cacerts(),
+  CaCerts = certifi:cacerts(),
 
-    logger:info("ceremony client connecting to ~s:~w", [Ip, Port]),
-    {ok, Pid} = gun:open(Ip, Port, #{ transport=>tls,
+  CHC=[
+       {match_fun, public_key:pkix_verify_hostname_match_fun(https)}
+      ],
+
+  logger:info("ceremony client connecting to ~s:~w", [Ip, Port]),
+  io:format("ceremony client connecting to ~s:~w~n", [Ip, Port]),
+  {ok, Pid} = gun:open(Ip, Port, #{ transport=>tls,
+                                    protocols => [http],
                                     transport_opts => [{verify, verify_peer},
+                                                       {customize_hostname_check, CHC},
                                                        %{cacertfile,"/usr/local/share/certs/ca-root-nss.crt"}
                                                        {cacerts, CaCerts}
                                                       ]}),
+  try
     receive
-      {gun_up, Pid, http} ->
-        ok
-    after 20000 ->
-            gun:close(Pid),
+      {gun_up, Pid, _HTTP} ->
+        ok;
+      {gun_down, Pid, _Protocol, closed, _, _} ->
+        throw(up_error)
+    after 5000 ->
             throw('up_timeout')
     end,
-    %Proto=case sync_get_decode(Pid, "/xchain/api/compat.mp") of
-    %        {200, _, #{<<"ok">>:=true,<<"version">>:=Ver}} -> Ver;
-    %        {404, _, _} -> 0;
-    %        _ -> 0
-    %      end,
     {[<<"websocket">>],UpgradeHdrs}=upgrade(Pid),
     logger:info("Conn upgrade hdrs: ~p",[UpgradeHdrs]),
     Priv=get_privkey(),
@@ -49,36 +52,40 @@ run(#{host:=Ip, port:=Port} = Sub) ->
                      token => Token,
                      nodename => NodeName
                     }),
-    %io:format("Hello response is ~p~n",[R]),
     logger:info("Hello response is ~p",[R]),
     case R of
       #{null := <<"hello">>,<<"ok">> := true} ->
-        io:format("Connected successfully~n");
+        io:format("Connected successfully~n"),
+        ws_mode(Pid,Sub#{privkey=>Priv});
       #{null := <<"hello">>,<<"error">> := Error} ->
-        io:format("Server rejects connection, reason: ~s~n~n",[Error]),
-        timer:sleep(1000)
+        io:format("Server rejects connection, reason: ~s~n~n",[Error])
     end,
 
-    %BlockList=block_list(Pid, Proto, GetFun(chain), last, Known, []),
-    %[<<"subscribed">>,_]=make_ws_req(Pid,
-    %                                 #{null=><<"subscribe">>,
-    %                                   <<"channel">>=>1}
-    %                                ),
-    %io:format("SubRes ~p~n",[SubRes]),
-    %ok=gun:ws_send(Pid, {binary, msgpack:pack(#{null=><<"ping">>})}),
-    ws_mode(Pid,Sub#{privkey=>Priv}),
     gun:close(Pid),
     done
   catch
     throw:up_timeout ->
-      logger:debug("connection to ~p was timed out", [Sub]),
-      timeout;
+      io:format("connection to ~p was timed out~n", [Sub]),
+      logger:error("connection to ~p was timed out", [Sub]),
+      up_timeout;
+    throw:Ee:S ->
+      gun:close(Pid),
+      io:format("ceremony client error ~p~n",[Ee]),
+      logger:error("ceremony client error ~p",[Ee]),
+          lists:foreach(
+            fun(SE) ->
+                logger:error("@ ~p", [SE])
+            end, S),
+          Ee;
     Ec:Ee:S ->
+      gun:close(Pid),
+          io:format("ceremony client error ~p:~p~n",[Ec,Ee]),
           logger:error("ceremony client error ~p:~p",[Ec,Ee]),
           lists:foreach(
             fun(SE) ->
                 logger:error("@ ~p", [SE])
-            end, S)
+            end, S),
+          {Ec,Ee}
   end.
 
 ws_mode(Pid,Sub) ->
@@ -192,8 +199,15 @@ upgrade(Pid) ->
   gun:ws_upgrade(Pid, "/api/ws",
                  [ {<<"sec-websocket-protocol">>, <<"thepower-tea-ceremony-v1">>} ]),
   receive {gun_upgrade,Pid,_Ref,Status,Headers} ->
-            {Status, Headers}
-  after 10000 ->
+            {Status, Headers};
+          {gun_down, Pid, _Protocol, closed, [], []} ->
+            gun:close(Pid),
+            throw(upgrade_error);
+          {gun_response, Pid, _Ref, _Fin, ErrorCode, _Headers} ->
+            gun:close(Pid),
+            throw({upgrade_error, ErrorCode})
+  after 5000 ->
+          gun:close(Pid),
           throw(upgrade_timeout)
   end.
 
