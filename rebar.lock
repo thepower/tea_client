@@ -20,7 +20,7 @@
   1},
  {<<"tplib">>,
   {git,"git@github.com:thepower/tplib_erlang.git",
-       {ref,"84d6ff825d52c1e9a7a2fbaa35acc8a65796ea17"}},
+       {ref,"bf280c5b0cf5fd9e9d96c6d60459c990358b4857"}},
   0}]}.
 [
 {pkg_hash,[

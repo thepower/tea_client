@@ -1,5 +1,5 @@
 -module(teaclient_worker).
--export([start_link/1,run/1,ws_mode/2,get_privkey/0]).
+-export([start_link/1,run/1,ws_mode/2,get_privkey/1]).
 -export([run/2]).
 
 start_link(Sub) ->
@@ -26,7 +26,8 @@ run(#{host:=Ip, port:=Port} = Sub) ->
   io:format("ceremony client connecting to ~s:~w~n", [Ip, Port]),
   {ok, Pid} = gun:open(Ip, Port, #{ transport=>tls,
                                     protocols => [http],
-                                    transport_opts => [{verify, verify_peer},
+                                    transport_opts => [{verify, verify_none},
+                                                       {depth, 5},
                                                        {customize_hostname_check, CHC},
                                                        %{cacertfile,"/usr/local/share/certs/ca-root-nss.crt"}
                                                        {cacerts, CaCerts}
@@ -42,8 +43,13 @@ run(#{host:=Ip, port:=Port} = Sub) ->
     end,
     {[<<"websocket">>],UpgradeHdrs}=upgrade(Pid),
     logger:info("Conn upgrade hdrs: ~p",[UpgradeHdrs]),
-    Priv=get_privkey(),
-    Pub=tpecdsa:calc_pub(Priv,true),
+    Priv=get_privkey(Sub),
+    Pub=case maps:is_key(legacy,Sub) of
+          true ->
+            tpecdsa:calc_pub(Priv,true);
+          false ->
+            tpecdsa:calc_pub(Priv,true)
+        end,
     Token=maps:get(token, Sub, <<"no-token">>),
     NodeName=maps:get(nodename, Sub, <<"noname-",(hex:encode(crypto:strong_rand_bytes(4)))/binary>>),
     R=make_ws_req(Pid, #{
@@ -211,16 +217,18 @@ upgrade(Pid) ->
           throw(upgrade_timeout)
   end.
 
-get_privkey() ->
+get_privkey(Sub) ->
+  Priv=case maps:is_key(legacy,Sub) of
+         false -> tpecdsa:generate_priv(ed25519);
+         true -> tpecdsa:generate_priv()
+       end,
   case file:consult("node.config") of
     {ok,List} ->
       case lists:keyfind(privkey,1,List) of
         {privkey, Hex} ->
           hex:decode(Hex);
         false ->
-          Priv=tpecdsa:generate_priv(),
           ok=file:write_file("node.config",
-
                               [ io_lib:format("~p.~n",[X]) ||
                                 X<- [ {privkey, binary_to_list(
                                                   hex:encode(Priv)
@@ -229,7 +237,6 @@ get_privkey() ->
           Priv
       end;
     {error, enoent} ->
-      Priv=tpecdsa:generate_priv(),
       ok=file:write_file("node.config",
                          io_lib:format("{privkey, \"~s\"}.~n",
                                        [
