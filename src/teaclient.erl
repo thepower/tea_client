@@ -5,6 +5,7 @@
 main([]) ->
     getopt:usage(option_spec_list(), escript:script_name());
 main(Args) ->
+  logger:remove_handler(default),
   OptSpecList = option_spec_list(),
   case getopt:parse(OptSpecList, Args) of
     {ok, {Options, []}} ->
@@ -13,6 +14,18 @@ main(Args) ->
           getopt:usage(OptSpecList, "teaclient");
         _ ->
           application:ensure_all_started(teaclient),
+          case lists:member(v,Options) of
+            true ->
+              Config=#{
+                       config => #{ type=>standard_error },
+                       level => info,
+                       filters => [{nosasl, {fun logger_filters:progress/2, stop}}]
+                      },
+              logger:add_handler(default, logger_std_h, Config);
+            false ->
+              ok
+          end,
+
           PArgs=lists:foldl(
                   fun({nodename,NN}, Acc) ->
                       Acc#{nodename=>list_to_binary(NN)};
@@ -38,6 +51,8 @@ option_spec_list() ->
    {host,        $h,        "host",        {string, "tea.thepower.io"}, "Seremony server"},
    {port,        $p,        "port",        {integer, 443},              "Ceremony server's TLS port"},
    {nodename,    $n,        "nodename",    string,                      "node name (max 10 symbols)"},
+   {v,           $v,        undefined,     undefined, "log errors"},
+   {ncp,         undefined, "npc",     undefined, "Do not check ports"},
    {legacy,      $l,        "legacy",      undefined,                   "Use legacy secp256k1 keys \n"
     "(default - ed25519)"},
    {token,       undefined, undefined,     string,                      "ceremony token"}
