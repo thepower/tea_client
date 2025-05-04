@@ -50,8 +50,10 @@ run(#{host:=Ip, port:=Port} = Sub) ->
           false ->
             tpecdsa:calc_pub(Priv,true)
         end,
+    {_,<<PubH:6/binary,_/binary>>}=tpecdsa:cmp_pubkey(Pub),
     Token=maps:get(token, Sub, <<"no-token">>),
-    NodeName=maps:get(nodename, Sub, <<"noname-",(hex:encode(crypto:strong_rand_bytes(4)))/binary>>),
+    NodeName=maps:get(nodename, Sub, <<(hex:encode(PubH))/binary>>),
+    check_ports(Pid, Sub#{pubkey=>Pub,token=>Token,nodename=>NodeName}),
     R=make_ws_req(Pid, #{
                      null=><<"hello">>,
                      pubkey => Pub,
@@ -63,6 +65,9 @@ run(#{host:=Ip, port:=Port} = Sub) ->
       #{null := <<"hello">>,<<"ok">> := true} ->
         io:format("Connected successfully~n"),
         ws_mode(Pid,Sub#{privkey=>Priv});
+      #{null := <<"hello">>,<<"error">> := <<"you_are_late">>} ->
+        Error="Sorry. All places in this chain are already taken. In the bot, you can request to participate in another chain.",
+        io:format("Server rejects connection, reason:~n  ~s~n~n",[Error]);
       #{null := <<"hello">>,<<"error">> := Error} ->
         io:format("Server rejects connection, reason: ~s~n~n",[Error])
     end,
@@ -80,6 +85,7 @@ run(#{host:=Ip, port:=Port} = Sub) ->
       logger:error("ceremony client error ~p",[Ee]),
           lists:foreach(
             fun(SE) ->
+                io:format("@ ~p", [SE]),
                 logger:error("@ ~p", [SE])
             end, S),
           Ee;
@@ -93,6 +99,68 @@ run(#{host:=Ip, port:=Port} = Sub) ->
             end, S),
           {Ec,Ee}
   end.
+
+check_ports(_Pid, Sub=#{ncp:=true}) ->
+  Sub;
+
+check_ports(Pid, Sub=#{token:=Token,nodename:=NodeName,pubkey:=Pub}) ->
+  CP=make_ws_req(Pid, #{
+                     null=><<"cp">>,
+                     pubkey => Pub,
+                     token => Token,
+                     nodename => NodeName
+                    }),
+  case CP of
+    #{null := <<"cp">>,<<"check">> := true, <<"ports">> :=Ports} ->
+      Opened=lists:foldl(fun(P,A) when is_integer(P), P>1024, P<65535 ->
+                        R=ranch:start_listener({listener,P},
+                                               ranch_tcp,
+                                               [ {port, P} ],
+                                               cowboy_clear,
+                                               #{
+                                                 connection_type => supervisor,
+                                                 env => #{
+                                                          dispatch =>
+                                                          cowboy_router:compile([{'_',[{"/",teaclient_http,#{pub=>Pub}}]}])
+                                                         }
+                                                }
+                                              ),
+                        io:format("Listen port ~w: ~p~n",[P,R]),
+                        A+1;
+                       (P,A) ->
+                        io:format("Ignore port ~p~n",[P]),
+                        A
+                    end, 0, Ports),
+      if(Opened>0) ->
+          io:format("Checking ports, please wait...~n"),
+          CP2=make_ws_req(Pid, #{
+                                 null=><<"cp2">>,
+                                 token => Token,
+                                 pubkey => Pub
+                                },60000),
+          case CP2 of
+            #{null := <<"cp2">>, <<"res">> := ResMap } ->
+              io:format("Ports checking result:~n",[]),
+              maps:foreach(
+                fun(K,true) ->
+                    io:format(" - Port ~w: ok~n",[K]);
+                   (K,V) ->
+                    io:format(" - Port ~w: ~s~n",[K,V])
+                end,
+                ResMap),
+              ok;
+            _ ->
+              io:format("Unexpected answer ~p~n",[CP2])
+          end,
+          Sub;
+        true ->
+          Sub
+      end;
+    _ ->
+      Sub
+  end.
+
+
 
 ws_mode(Pid,Sub) ->
   receive
@@ -126,7 +194,7 @@ ws_mode(Pid,Sub) ->
 %      ?MODULE:ws_mode(Pid, Sub);
     {gun_ws, Pid, _Ref, {binary, Bin}} ->
       {ok,Cmd} = msgpack:unpack(Bin),
-      logger:debug("ceremony client got ~p",[Cmd]),
+      logger:info("ceremony client got ~p",[Cmd]),
       Sub1=handle_msg(Cmd, Sub#{pid=>Pid}),
       %Sub1=xchain_client_handler:handle_xchain(Cmd, Pid, Sub),
       ?MODULE:ws_mode(Pid, Sub1);
@@ -143,6 +211,23 @@ ws_mode(Pid,Sub) ->
           ok=gun:ws_send(Pid, {binary, msgpack:pack(#{null=><<"ping">>})}),
           ?MODULE:ws_mode(Pid, Sub)
   end.
+
+%handle_msg(#{null := <<"listen_port">>,<<"port">>:=PortNum}, #{privkey:=Priv}=Sub) ->
+%  Pub=tpecdsa:calc_pub(Priv),
+%  io:format("Port ~w listen request",[PortNum]),
+%  R=ranch:start_listener({listener,PortNum},ranch_tcp,
+%                       [ {port, PortNum} ],
+%                       cowboy_clear,
+%                       #{
+%                         connection_type => supervisor,
+%                         env => #{
+%                                  dispatch =>
+%                                  cowboy_router:compile([{'_',[{"/",teaclient_http,#{pub=>Pub}}]}])
+%                                 }
+%                        }
+%                      ),
+%  io:format(": ~p~n",[R]),
+%  Sub;
 
 handle_msg(#{null := <<"signtx">>,<<"patchtx">>:=BinTx}, #{pid:=Pid, privkey:=Priv}=Sub) ->
   %Priv=tpecdsa:generate_priv(),
@@ -183,11 +268,28 @@ handle_msg(#{null := <<"genesis">>,<<"block">>:=BinBlock}, Sub) ->
   init:stop(),
   Sub;
 
+handle_msg(#{null := <<"node_config">>,<<"config">>:=BinCfg}, Sub) ->
+  case file:consult("node.config") of
+    {ok,[{privkey,PK}]} ->
+      file:rename("node.config","node.config_old"),
+      file:write_file("node.config",io_lib:format("~s~n~p.~n",[BinCfg,{privkey,PK}])),
+      io:format("-=-= [ Config generated ] =-=-~n",[]),
+      ok;
+    _ ->
+      file:write_file("node_example.config",BinCfg),
+      io:format("-=-= [ Config template written to node_example.config ] =-=-~n",[]),
+      ok
+  end,
+  Sub;
+
 handle_msg(Msg, Sub) ->
   logger:info("Unhandled msg ~p",[Msg]),
   Sub.
   
 make_ws_req(Pid, Request) ->
+  make_ws_req(Pid, Request, 5000).
+
+make_ws_req(Pid, Request, Timeout) ->
   receive {gun_ws,Pid, {binary, _}} ->
             throw('unexpected_data')
   after 0 -> ok
@@ -197,7 +299,7 @@ make_ws_req(Pid, Request) ->
   receive {gun_ws,Pid, _Ref, {binary, Payload}}->
             {ok, Res} = msgpack:unpack(Payload),
             Res
-  after 5000 ->
+  after Timeout ->
           throw('ws_timeout')
   end.
 
