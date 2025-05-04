@@ -16,11 +16,11 @@
   1},
  {<<"msgpack">>,
   {git,"https://github.com/cleverfox/msgpack-erlang",
-       {ref,"a0f026c803a66da925ae3cbb3198a1c5ca83162a"}},
-  1},
+       {ref,"40e758e9a1c6b538ca4ca0522a711ce4380b6860"}},
+  0},
  {<<"tplib">>,
   {git,"git@github.com:thepower/tplib_erlang.git",
-       {ref,"bf280c5b0cf5fd9e9d96c6d60459c990358b4857"}},
+       {ref,"2633a9653d95a0c8bbf3a1e66f28f9c4457b52bd"}},
   0}]}.
 [
 {pkg_hash,[
